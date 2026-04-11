@@ -4,7 +4,7 @@ import pandas as pd
 import sys
 import librosa
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))  # Add parent directory
-from utils import GENRES, SAMPLE_RATE, DURATION
+from utils import GENRES, SAMPLE_RATE
 
 
 def safe_scalar(value, default=0.0):
