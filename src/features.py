@@ -13,11 +13,6 @@ def safe_scalar(value, default=0.0):
         return float(default)
     return scalar
 
-def compute_mel_spectrogram(audio, sr = SAMPLE_RATE, n_mels=128, hop_length=512):
-    mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=n_mels, hop_length=hop_length)
-    mel_db = librosa.power_to_db(mel, ref=np.max)   
-    return mel_db
-
 def compute_mfcc(audio, sr = SAMPLE_RATE, n_mfcc=40):
     mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
     mfcc_mean = np.mean(mfccs, axis=1)
