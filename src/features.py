@@ -1,6 +1,5 @@
 import os 
 import numpy as np
-import pandas as pd
 import sys
 import librosa
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))  # Add parent directory
@@ -56,23 +55,18 @@ def extract_all_features(audio, sr=SAMPLE_RATE):
     all_features = np.concatenate([mfcc_features, additional_features])
     return all_features  # 175 numbers total
 
-def build_feature_dataset(processed_dir, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    
-    X = []  # features
-    y = []  # labels
-    files = []  # track filenames
-    
+
+def _extract_features_from_dir(input_dir, X, y, files):
     for label, genre in enumerate(GENRES):
-        genre_dir = os.path.join(processed_dir, genre)
-        
+        genre_dir = os.path.join(input_dir, genre)
+
         if not os.path.exists(genre_dir):
-            print(f"Skipping {genre} — folder not found")
+            print(f"Skipping {genre} - folder not found in {input_dir}")
             continue
-        
+
         clips = [f for f in os.listdir(genre_dir) if f.endswith('.wav')]
-        print(f"\nProcessing {genre} ({len(clips)} clips)...")
-        
+        print(f"\nProcessing {genre} ({len(clips)} clips) from {input_dir}...")
+
         for clip_name in clips:
             clip_path = os.path.join(genre_dir, clip_name)
             try:
@@ -82,22 +76,43 @@ def build_feature_dataset(processed_dir, output_dir):
                 y.append(label)
                 files.append(clip_path)
             except Exception as e:
-                print(f"  ✗ Error: {clip_name} — {e}")
-        
-        print(f"  ✓ Done: {genre}")
-    
-    X = np.array(X)
-    y = np.array(y)
-    
-    np.save(os.path.join(output_dir, "X_features.npy"), X)
-    np.save(os.path.join(output_dir, "y_labels.npy"), y)
-    
-    print(f"\n{'='*40}")
-    print(f"Feature extraction complete!")
-    print(f"X shape: {X.shape}")
-    print(f"y shape: {y.shape}")
-    print(f"Features per clip: {X.shape[1]}")
-    print(f"Saved to: {output_dir}")
+                print(f"  ERROR: {clip_name} - {e}")
+
+        print(f"  DONE: {genre}")
+
+
+def build_feature_dataset(split_root_dir, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+
+    for split_name in ("train", "test"):
+        input_dir = os.path.join(split_root_dir, split_name)
+        split_output_dir = os.path.join(output_dir, split_name)
+        os.makedirs(split_output_dir, exist_ok=True)
+
+        X = []  # features
+        y = []  # labels
+        files = []  # track filenames
+
+        _extract_features_from_dir(input_dir, X, y, files)
+
+        if not X:
+            raise RuntimeError(f"No clips found under {input_dir}. Expected genre folders.")
+
+        X = np.array(X)
+        y = np.array(y)
+        files = np.array(files)
+
+        np.save(os.path.join(split_output_dir, "X_features.npy"), X)
+        np.save(os.path.join(split_output_dir, "y_labels.npy"), y)
+        np.save(os.path.join(split_output_dir, "file_paths.npy"), files)
+
+        print(f"\n{'='*40}")
+        print(f"{split_name.title()} feature extraction complete!")
+        print(f"X shape: {X.shape}")
+        print(f"y shape: {y.shape}")
+        print(f"files shape: {files.shape}")
+        print(f"Features per clip: {X.shape[1]}")
+        print(f"Saved to: {split_output_dir}")
 
 if __name__ == "__main__":
-    build_feature_dataset(processed_dir="data/processed", output_dir="data/features")
+    build_feature_dataset(split_root_dir="data/splits", output_dir="data/features")

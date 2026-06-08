@@ -17,7 +17,7 @@ if SRC_DIR.exists():
 
 try:
     from utils import GENRES, SAMPLE_RATE, DURATION
-    from preprocess import load_audio, chunk_audio
+    from chunks import load_audio, chunk_audio
 except Exception:
     GENRES = ["tamang_selo", "deuda", "bhajan", "newari", "tharu", "lok_dohori"]
     SAMPLE_RATE = 22050
