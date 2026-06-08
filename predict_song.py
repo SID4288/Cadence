@@ -1,267 +1,219 @@
-import argparse
-import os
-import random
-import sys
-from pathlib import Path
+"""
+predict_song.py  —  Nepali Music Genre Classifier
+==================================================
+Usage:
+    python predict_song.py path/to/song.mp3
+    python predict_song.py path/to/song.wav --model best_genre_model.pth
+"""
 
-import librosa
+import sys
+import argparse
+
 import numpy as np
+import librosa
 import torch
 import torch.nn as nn
-from torchvision import models, transforms
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-SRC_DIR = PROJECT_ROOT / "src"
-if SRC_DIR.exists():
-    sys.path.insert(0, str(SRC_DIR))
-
-try:
-    from utils import GENRES, SAMPLE_RATE, DURATION
-    from chunks import load_audio, chunk_audio
-except Exception:
-    GENRES = ["tamang_selo", "deuda", "bhajan", "newari", "tharu", "lok_dohori"]
-    SAMPLE_RATE = 22050
-    DURATION = 30
-
-    def load_audio(filepath):
-        audio, sr = librosa.load(filepath, sr=SAMPLE_RATE, mono=True)
-        return audio, sr
-
-    def chunk_audio(audio):
-        samples_per_clip = int(SAMPLE_RATE * DURATION)
-        total_samples = len(audio)
-        chunks = []
-        for start in range(0, total_samples, samples_per_clip):
-            end = start + samples_per_clip
-            chunk = audio[start:end]
-            if len(chunk) < samples_per_clip:
-                padding = np.zeros(samples_per_clip - len(chunk))
-                chunk = np.concatenate((chunk, padding))
-            chunks.append(chunk)
-        return chunks
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 
 
-class FolkMusicClassifier(nn.Module):
-    def __init__(self, num_classes=len(GENRES), pretrained=False):
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. CONSTANTS  (must match training exactly)
+# ─────────────────────────────────────────────────────────────────────────────
+
+GENRES = ["bhajan", "deuda", "lok_dohori", "newari", "tamang_selo", "tharu"]
+NUM_CLASSES = len(GENRES)
+IDX_TO_GENRE = {i: g for i, g in enumerate(GENRES)}
+
+# Global normalisation stats computed from training data
+GLOBAL_MEAN = 0.4551
+GLOBAL_STD  = 0.1986
+
+# Spectrogram / chunking parameters
+SR          = 22050
+N_MELS      = 128
+HOP_LENGTH  = 512
+N_FFT       = 2048
+CHUNK_SECS  = 30                          # 30 s → 1292 frames at sr=22050
+CHUNK_SAMP  = CHUNK_SECS * SR            # 661 500 samples
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. MODEL  (exact copy of training architecture)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MixPool(nn.Module):
+    def __init__(self, in_dim):
         super().__init__()
-        weights = models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None
-        self.backbone = models.efficientnet_b0(weights=weights)
-        num_features = self.backbone.classifier[1].in_features
-        self.backbone.classifier = nn.Sequential(
-            nn.Dropout(p=0.3),
-            nn.Linear(num_features, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(p=0.2),
-            nn.Linear(256, num_classes),
+        self.proj = nn.Linear(in_dim * 2, in_dim)
+
+    def forward(self, x):
+        avg = x.mean(dim=1)
+        mx  = x.max(dim=1).values
+        return self.proj(torch.cat([avg, mx], dim=-1))
+
+
+class EfficientNetBiLSTMClassifier(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        backbone      = efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
+        self.features = backbone.features
+        self.bilstm   = nn.LSTM(
+            input_size=1280, hidden_size=192, num_layers=2,
+            batch_first=True, bidirectional=True, dropout=0.4,
+        )
+        self.lstm_drop = nn.Dropout(0.4)
+        self.pool      = MixPool(384)
+        self.classifier = nn.Sequential(
+            nn.Linear(384, 128),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
-        return self.backbone(x)
+        x = self.features(x)          # (B, 1280, 4, T//32)
+        x = x.mean(dim=2)             # (B, 1280, T//32)
+        x = x.permute(0, 2, 1)        # (B, T//32, 1280)
+        x, _ = self.bilstm(x)         # (B, T//32, 384)
+        x = self.lstm_drop(x)
+        x = self.pool(x)              # (B, 384)
+        return self.classifier(x)     # (B, num_classes)
 
 
-def audio_to_mel(audio, sr, n_mels=128, hop_length=512):
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. PREPROCESSING  (must mirror how the Kaggle .npy files were built)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def audio_to_mel_npy(audio_segment: np.ndarray) -> np.ndarray:
+    """
+    Convert a raw audio segment (1-D float32 at SR=22050) to the same
+    format as the pre-computed .npy files in the training dataset.
+
+    Pipeline:
+        power mel → dB (ref=max) → min-max normalise to [0, 1]
+
+    The resulting mean≈0.45 / std≈0.20 matches GLOBAL_MEAN / GLOBAL_STD
+    from the training logs, confirming this is correct.
+    """
     mel = librosa.feature.melspectrogram(
-        y=audio,
-        sr=sr,
-        n_mels=n_mels,
-        hop_length=hop_length,
+        y=audio_segment, sr=SR, n_fft=N_FFT,
+        hop_length=HOP_LENGTH, n_mels=N_MELS,
     )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-    mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-9)
-    return mel_norm
+    mel_db = librosa.power_to_db(mel, ref=np.max)            # (128, T)  range ~[-80, 0]
+    # min-max normalise to [0, 1]  ← this is why GLOBAL_MEAN ≈ 0.45
+    mel_norm = (mel_db - mel_db.min()) / (mel_db.max() - mel_db.min() + 1e-8)
+    return mel_norm.astype(np.float32)                        # (128, T)
 
 
-def build_batch(chunks, sr, transform):
-    tensors = []
-    for chunk in chunks:
-        mel_spec = audio_to_mel(chunk, sr)
-        mel_tensor = torch.tensor(mel_spec, dtype=torch.float32)
-        mel_tensor = mel_tensor.unsqueeze(0).repeat(3, 1, 1)
-        if transform:
-            mel_tensor = transform(mel_tensor)
-        tensors.append(mel_tensor)
-    return torch.stack(tensors, dim=0)
+def mel_to_3channel(mel: np.ndarray) -> np.ndarray:
+    """
+    Exact replica of load_3channel() from the training notebook.
+    Input : mel (128, T) — the .npy-equivalent values
+    Output: (3, 128, T)  float32
+    """
+    d1 = librosa.feature.delta(mel, order=1)
+    d2 = librosa.feature.delta(mel, order=2)
+
+    mel_g = (mel - GLOBAL_MEAN) / (GLOBAL_STD + 1e-8)       # global norm
+
+    def norm(arr):
+        return (arr - arr.mean()) / (arr.std() + 1e-8)
+
+    x = np.stack([norm(mel_g), norm(d1), norm(d2)], axis=0)  # (3, 128, T)
+    return x.astype(np.float32)
 
 
-def pick_random_audio_file(root_dir):
-    extensions = {".wav", ".mp3", ".flac", ".webm", ".m4a", ".mp4", ".ogg", ".opus"}
-    candidates = []
-    for base, _, files in os.walk(root_dir):
-        for filename in files:
-            if Path(filename).suffix.lower() in extensions:
-                candidates.append(Path(base) / filename)
-    if not candidates:
-        raise FileNotFoundError(f"No audio files found under: {root_dir}")
-    return random.choice(candidates)
+def audio_to_chunks(audio_path: str) -> list[np.ndarray]:
+    """
+    Load audio, pad/trim to full 30-second chunks, return list of (3,128,T).
+    Short songs (< 30 s) are zero-padded to one full chunk.
+    """
+    y, _ = librosa.load(audio_path, sr=SR, mono=True)
+
+    # Build non-overlapping 30-second chunks
+    chunks = []
+    for start in range(0, max(len(y), CHUNK_SAMP), CHUNK_SAMP):
+        segment = y[start : start + CHUNK_SAMP]
+        if len(segment) < CHUNK_SAMP * 0.25:      # skip tiny tail (< 7.5 s)
+            break
+        # zero-pad the last chunk if shorter than 30 s
+        if len(segment) < CHUNK_SAMP:
+            segment = np.pad(segment, (0, CHUNK_SAMP - len(segment)))
+
+        mel   = audio_to_mel_npy(segment)
+        x     = mel_to_3channel(mel)
+        chunks.append(x)
+
+    return chunks
 
 
-def predict_song(
-    file_path,
-    weights_path,
-    device="auto",
-    top_k=3,
-    min_confidence=0.5,
-    min_margin=0.15,
-    max_entropy=1.2,
-    min_chunk_confidence=0.6,
-    min_chunk_ratio=0.6,
-    show_chunks=False,
-):
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. INFERENCE
+# ─────────────────────────────────────────────────────────────────────────────
 
-    audio, sr = load_audio(str(file_path))
-    chunks = chunk_audio(audio)
+def load_model(model_path: str) -> EfficientNetBiLSTMClassifier:
+    model = EfficientNetBiLSTMClassifier(NUM_CLASSES).to(DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.eval()                       # ← disables dropout for stable output
+    return model
 
-    transform = transforms.Compose([
-        transforms.Resize((128, 256)),
-    ])
 
-    batch = build_batch(chunks, sr, transform).to(device)
+def predict(audio_path: str, model: EfficientNetBiLSTMClassifier) -> dict:
+    chunks = audio_to_chunks(audio_path)
+    if not chunks:
+        raise ValueError(f"Could not extract any audio chunks from {audio_path}")
 
-    model = FolkMusicClassifier(num_classes=len(GENRES), pretrained=False).to(device)
-    state_dict = torch.load(weights_path, map_location=device)
-    model.load_state_dict(state_dict)
-    model.eval()
-
+    all_logits = []
     with torch.no_grad():
-        logits = model(batch)
-        probs = torch.softmax(logits, dim=1).cpu().numpy()
+        for x in chunks:
+            tensor = torch.tensor(x).unsqueeze(0).to(DEVICE)  # (1,3,128,T)
+            logits = model(tensor)                              # (1, 6)
+            all_logits.append(logits)
 
-    avg_probs = probs.mean(axis=0)
-    top_indices = np.argsort(avg_probs)[::-1][:top_k]
-    best_idx = int(top_indices[0])
-    best_conf = float(avg_probs[best_idx])
-    second_conf = float(avg_probs[top_indices[1]]) if len(top_indices) > 1 else 0.0
-    confidence_margin = best_conf - second_conf
-
-    entropy = float(-np.sum(avg_probs * np.log(avg_probs + 1e-12)))
-    chunk_confidence = probs.max(axis=1)
-    chunk_ratio = float(np.mean(chunk_confidence >= min_chunk_confidence))
-
-    accepted = (
-        best_conf >= min_confidence
-        and confidence_margin >= min_margin
-        and entropy <= max_entropy
-        and chunk_ratio >= min_chunk_ratio
-    )
-
-    print(f"File: {file_path}")
-    print(f"Chunks: {len(chunks)}")
-    if not accepted:
-        print("Genre not found for this song")
-        print(
-            "Rejection stats: max_conf={:.2f}%, margin={:.2f}%, entropy={:.3f}, chunk_ratio={:.2f}".format(
-                best_conf * 100.0,
-                confidence_margin * 100.0,
-                entropy,
-                chunk_ratio,
-            )
-        )
-    print("Top predictions:")
-    for idx in top_indices:
-        print(f"  {GENRES[idx]}: {avg_probs[idx] * 100:.2f}%")
-
-    if show_chunks:
-        for i, row in enumerate(probs, start=1):
-            chunk_top = np.argmax(row)
-            print(f"Chunk {i}: {GENRES[chunk_top]} ({row[chunk_top] * 100:.2f}%)")
+    # Soft voting: average logits across all chunks → one prediction per song
+    avg_logits = torch.stack(all_logits).mean(dim=0)           # (1, 6)
+    probs      = torch.softmax(avg_logits, dim=1)[0]           # (6,)
+    pred_idx   = probs.argmax().item()
 
     return {
-        "file": str(file_path),
-        "avg_probs": avg_probs,
-        "predicted_genre": None if not accepted else GENRES[best_idx],
-        "confidence": best_conf,
-        "confidence_margin": confidence_margin,
-        "entropy": entropy,
-        "chunk_ratio": chunk_ratio,
-        "accepted": accepted,
-        "top_indices": top_indices,
+        "predicted_genre": IDX_TO_GENRE[pred_idx],
+        "confidence":      probs[pred_idx].item(),
+        "all_probs":       {IDX_TO_GENRE[i]: probs[i].item() for i in range(NUM_CLASSES)},
+        "num_chunks":      len(chunks),
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Classify an audio file with the CNN model.")
-    parser.add_argument("--file", type=str, help="Path to an audio file to classify.")
-    parser.add_argument(
-        "--random-dir",
-        type=str,
-        help="Pick a random audio file from this directory (recursive).",
-    )
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default=str(PROJECT_ROOT / "models" / "classifier" / "best_cnn_model.pth"),
-        help="Path to the CNN weights file.",
-    )
-    parser.add_argument("--top-k", type=int, default=3, help="Number of top classes to show.")
-    parser.add_argument(
-        "--min-confidence",
-        type=float,
-        default=0.5,
-        help="Minimum confidence required to accept a genre prediction.",
-    )
-    parser.add_argument(
-        "--min-margin",
-        type=float,
-        default=0.15,
-        help="Minimum margin between top-1 and top-2 to accept a prediction.",
-    )
-    parser.add_argument(
-        "--max-entropy",
-        type=float,
-        default=1.2,
-        help="Maximum entropy allowed to accept a prediction.",
-    )
-    parser.add_argument(
-        "--min-chunk-confidence",
-        type=float,
-        default=0.6,
-        help="Minimum chunk confidence for chunk consistency check.",
-    )
-    parser.add_argument(
-        "--min-chunk-ratio",
-        type=float,
-        default=0.6,
-        help="Minimum fraction of chunks above min-chunk-confidence to accept.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cpu", "cuda"],
-        help="Device to run inference on.",
-    )
-    parser.add_argument(
-        "--show-chunks",
-        action="store_true",
-        help="Print per-chunk predictions.",
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 
+def main():
+    parser = argparse.ArgumentParser(description="Predict Nepali music genre")
+    parser.add_argument("audio",  help="Path to audio file (.mp3 / .wav / .flac …)")
+    parser.add_argument(
+    "--model",
+    default="models/classifier/best_genre_model.pth",
+    help="Path to model weights"
+)
     args = parser.parse_args()
 
-    if args.file:
-        file_path = Path(args.file)
-    else:
-        base_dir = Path(args.random_dir) if args.random_dir else PROJECT_ROOT / "data" / "raw"
-        file_path = pick_random_audio_file(base_dir)
-        print(f"Random pick: {file_path}")
+    print(f"\nLoading model from: {args.model}")
+    model = load_model(args.model)
 
-    if not file_path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
+    print(f"Predicting:        {args.audio}")
+    result = predict(args.audio, model)
 
-    predict_song(
-        file_path=file_path,
-        weights_path=args.weights,
-        device=args.device,
-        top_k=args.top_k,
-        min_confidence=args.min_confidence,
-        min_margin=args.min_margin,
-        max_entropy=args.max_entropy,
-        min_chunk_confidence=args.min_chunk_confidence,
-        min_chunk_ratio=args.min_chunk_ratio,
-        show_chunks=args.show_chunks,
-    )
+    print(f"\n{'─'*40}")
+    print(f"  Predicted genre : {result['predicted_genre'].upper()}")
+    print(f"  Confidence      : {result['confidence']*100:.1f}%")
+    print(f"  Chunks analysed : {result['num_chunks']}")
+    print(f"\n  All probabilities:")
+    for genre, prob in sorted(result["all_probs"].items(), key=lambda x: -x[1]):
+        bar = "█" * int(prob * 30)
+        print(f"    {genre:<15} {prob*100:5.1f}%  {bar}")
+    print(f"{'─'*40}\n")
 
 
 if __name__ == "__main__":
