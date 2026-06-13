@@ -1,0 +1,15 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.22
+
+# Settings
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# ML / Audio (Updated for Python 3.13 compatibility)
+torch>=2.6.0
+torchvision>=0.21.0
+librosa>=0.10.2.post1
+numpy>=2.1.0
+soundfile==0.12.1
