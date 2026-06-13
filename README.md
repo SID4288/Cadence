@@ -12,7 +12,7 @@ State-of-the-art approach for classifying six Nepali folk music genres using dom
 
 ### 1. Constant-Q Transform (CQT)
 
-Mel spectrograms use linearly spaced frequency bins, which do not align with how pitch works in music. The **Constant-Q Transform** uses logarithmically spaced bins so each octave contains the same number of bins — matching musical semitones and octaves.
+Mel spectrograms use linearly spaced frequency bins, which do not align with how pitch works in music. The **Constant-Q Transform** uses logarithmically spaced bins so each octave contains the same number of bins : matching musical semitones and octaves.
 
 | Parameter         | Value    | Rationale                       |
 | ----------------- | -------- | ------------------------------- |
@@ -85,7 +85,7 @@ Raw Audio (.wav)
 │  CQT (per src)  │  -> dB -> normalize [0,1]
 └────────┬────────┘
          ▼
-   (2, 84, 1292)  ──►  FolkMusicCQTResNet  ──►  6-class logits
+   (2, 84, 1292)  ->  FolkMusicCQTResNet  ->  6-class logits
 ```
 
 ### FolkMusicCQTResNet
@@ -111,7 +111,7 @@ BatchNorm and dropout are integrated into every block (not only the classifier h
 
 | Stage              | Operation                          | Output Shape (H × W) |
 | ------------------ | ---------------------------------- | -------------------- |
-| Input              | —                                  | 84 × 1292            |
+| Input              | :                                  | 84 × 1292            |
 | `conv_init`        | Conv2d 2->32, BN, ReLU             | 84 × 1292            |
 | `layer1` + `pool1` | ResBlock 32->64, MaxPool 2×2       | 42 × 646             |
 | `layer2` + `pool2` | ResBlock 64->128, MaxPool 2×2      | 21 × 323             |
@@ -209,7 +209,7 @@ python predict_sota.py --file path/to/audio.wav --show-chunks
 
 ---
 
-## Approach 2 — Improved Model (`cadence-second.ipynb`)
+## Approach 2 : Improved Model (`cadence-second.ipynb`)
 
 After training and evaluating the first model, several weaknesses became clear: severe train–test overfitting, unstable test accuracy across epochs, weak performance on **Tharu** and **Newari**, and limited feature diversity (CQT-only). The second notebook addresses these with richer features, a stronger architecture, and more aggressive regularization.
 
@@ -240,7 +240,7 @@ The second approach extends HPSS + CQT with mel-spectrogram and temporal dynamic
 | 2 | Normalized mel-spectrogram (84 mels, 20–8000 Hz) | Perceptual frequency layout |
 | 3 | Delta-mel (first-order temporal derivative) | Onset / articulation cues |
 
-**Output shape:** `(4, 84, 1292)` — same spatial dimensions as the first model, with two additional complementary views of the signal.
+**Output shape:** `(4, 84, 1292)` : same spatial dimensions as the first model, with two additional complementary views of the signal.
 
 Precomputed arrays are saved to `processed_features/{train,test}/<genre>/` inside the notebook working directory (Kaggle: `/kaggle/working/processed_features`).
 
@@ -258,7 +258,7 @@ Raw Audio (.wav)
 │  HPSS + CQT-H/P + Mel + Delta-Mel       │
 └────────────────┬────────────────────────┘
                  ▼
-          (4, 84, 1292)  ──►  ImprovedFolkNet  ──►  6-class logits
+          (4, 84, 1292)  ->  ImprovedFolkNet  ->  6-class logits
 ```
 
 **Input:** `(batch, 4, 84, 1292)`
@@ -343,7 +343,7 @@ Open and run `notebook/cadence-second.ipynb` on Kaggle (GPU recommended) or loca
 
 ---
 
-## Model Comparison — Approach 1 vs. Approach 2
+## Model Comparison : Approach 1 vs. Approach 2
 
 Both models classify the same six Nepali folk genres on an identical train/test split (2,903 train / 810 test samples). Below is a detailed side-by-side comparison.
 
@@ -355,7 +355,7 @@ Both models classify the same six Nepali folk genres on an identical train/test 
 | Macro F1 | 0.7179 | **0.7408** | +0.023 |
 | Parameters | ~6.13M | ~6.47M | +340K |
 | Training epochs | 25 | 50 | +25 |
-| Best checkpoint | `models/first/sota_best_model.pth` | `models/second/best_model.pth` | — |
+| Best checkpoint | `models/first/sota_best_model.pth` | `models/second/best_model.pth` | - |
 
 Approach 2 improves overall accuracy and macro F1 modestly but consistently. The larger gains appear on previously weak classes rather than on headline accuracy alone.
 
@@ -372,7 +372,7 @@ Approach 2 improves overall accuracy and macro F1 modestly but consistently. The
 | tharu | 0.558 | **0.69** | +0.13 | Largest absolute gain; main target of improvements |
 | lok_dohori | **0.745** | 0.71 | −0.04 | Slight regression; still competitive |
 
-**Takeaway:** Approach 2 clearly wins on **Tharu**, **Newari**, and **Tamang Selo** — the classes most confused in the first model. **Bhajan** and **Lok Dohori** remain strong under approach 1; **Deuda** is mixed (better precision, worse recall in approach 2).
+**Takeaway:** Approach 2 clearly wins on **Tharu**, **Newari**, and **Tamang Selo** : the classes most confused in the first model. **Bhajan** and **Lok Dohori** remain strong under approach 1; **Deuda** is mixed (better precision, worse recall in approach 2).
 
 ---
 
@@ -441,7 +441,7 @@ From the first model’s confusion matrix analysis:
 
 - **Tharu → Tamang Selo** and **Deuda → Newari / Lok Dohori** were major error paths.
 
-Approach 2 reduces cross-confusion among minority / rhythmically similar classes by combining mel timbre, delta dynamics, and class-weighted loss. Remaining weak spot: **Deuda recall (0.50)** — the model often abstains from predicting deuda in favor of higher-precision but wrong alternatives, suggesting deuda still overlaps acoustically with newari and lok_dohori.
+Approach 2 reduces cross-confusion among minority / rhythmically similar classes by combining mel timbre, delta dynamics, and class-weighted loss. Remaining weak spot: **Deuda recall (0.50)** : the model often abstains from predicting deuda in favor of higher-precision but wrong alternatives, suggesting deuda still overlaps acoustically with newari and lok_dohori.
 
 ---
 
@@ -463,8 +463,8 @@ Approach 2 reduces cross-confusion among minority / rhythmically similar classes
 ```
 Cadence/
 ├── notebook/
-│   ├── cadence.ipynb           # Approach 1 — full pipeline
-│   └── cadence-second.ipynb    # Approach 2 — improved pipeline
+│   ├── cadence.ipynb           # Approach 1 : full pipeline
+│   └── cadence-second.ipynb    # Approach 2 : improved pipeline
 ├── models/
 │   ├── first/                  # sota_best_model.pth, epoch checkpoints
 │   └── second/                 # best_model.pth
